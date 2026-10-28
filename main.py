@@ -1,11 +1,13 @@
 """Combined bot runner — runs 3 Telegram bots as subprocesses + shared health server.
 
 Services:
-- glowroom-main  (@glowroomkira_bot)   runs glowroom/run.py
-- glowroom-admin (@glowwroom_klientbot) runs glowroom/admin.py
-- rodychi-leads  (@leadsrodychi_bot)   runs rodychi_leads/main.py
+- glowroom-main  (@glowroomkira_bot)   runs glowroom/run.py (python-telegram-bot)
+- glowroom-admin (@glowwroom_klientbot) runs glowroom/admin.py (python-telegram-bot)
+- rodychi-leads  (@leadsrodychi_bot)   runs rodychi_leads/main.py (aiogram)
 
-One Render container → one 750h quota. Health server on $PORT so Render keeps it alive.
+One Render container → one 750h quota.
+Health server on $PORT keeps Render container alive.
+Each sub-bot runs from its own subdirectory so its relative imports work.
 """
 import os
 import sys
@@ -23,63 +25,54 @@ log = logging.getLogger("combined")
 PORT = int(os.environ.get("PORT", "10000"))
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+BOT_SPECS = {
+    "glowroom-main": {
+        "cwd":    os.path.join(ROOT, "glowroom"),
+        "script": "run.py",
+        "env":    {"BOT_TOKEN": os.environ.get("GLOWROOM_TOKEN", "")},
+    },
+    "glowroom-admin": {
+        "cwd":    os.path.join(ROOT, "glowroom"),
+        "script": "admin.py",
+        "env":    {"TOKEN": os.environ.get("GLOWROOM_ADMIN_TOKEN", "")},
+    },
+    "rodychi-leads": {
+        "cwd":    os.path.join(ROOT, "rodychi_leads"),
+        "script": "main.py",
+        "env":    {"BOT_TOKEN": os.environ.get("RODYCHI_LEADS_TOKEN", "")},
+    },
+}
 
-def spawn_bot(name: str, module: str, env_overrides: dict) -> subprocess.Popen:
+BOTS = []  # [(name, popen)]
+
+
+def spawn_bot(name: str) -> subprocess.Popen:
+    spec = BOT_SPECS[name]
     env = dict(os.environ)
-    env.update(env_overrides)
-    # Prevent each sub-bot from binding its own health port; set PORT=0 (OS-assigned)
+    env.update(spec["env"])
+    # Prevent each sub-bot from binding our main health port
     env["PORT"] = "0"
-    cmd = [sys.executable, "-u", "-m", module]
-    log.info("Spawning %s: %s", name, " ".join(cmd))
-    p = subprocess.Popen(cmd, cwd=ROOT, env=env)
-    return p
-
-
-BOTS = []
+    cmd = [sys.executable, "-u", spec["script"]]
+    log.info("[%s] Spawning: %s (cwd=%s)", name, " ".join(cmd), spec["cwd"])
+    return subprocess.Popen(cmd, cwd=spec["cwd"], env=env)
 
 
 async def start_bots():
-    """Spawn each bot once at startup."""
-    # 1. glowroom main booking bot
-    BOTS.append(("glowroom-main", spawn_bot(
-        "glowroom-main", "glowroom.run",
-        {"BOT_TOKEN": os.environ.get("GLOWROOM_TOKEN", "")},
-    )))
-    # 2. glowroom admin bot
-    BOTS.append(("glowroom-admin", spawn_bot(
-        "glowroom-admin", "glowroom.admin",
-        {"TOKEN": os.environ.get("GLOWROOM_ADMIN_TOKEN", "")},
-    )))
-    # 3. rodychi leads webhook bot
-    BOTS.append(("rodychi-leads", spawn_bot(
-        "rodychi-leads", "rodychi_leads.main",
-        {"BOT_TOKEN": os.environ.get("RODYCHI_LEADS_TOKEN", "")},
-    )))
+    for name in BOT_SPECS:
+        BOTS.append([name, spawn_bot(name)])
 
 
 async def monitor_bots():
-    """Restart dead sub-processes after short backoff."""
+    """Restart dead sub-processes."""
     while True:
         await asyncio.sleep(30)
-        for i, (name, proc) in enumerate(list(BOTS)):
+        for i, (name, proc) in enumerate(BOTS):
             if proc.poll() is not None:
-                log.error("%s died with code %s — restarting", name, proc.returncode)
-                env_overrides = {
-                    "glowroom-main":  {"BOT_TOKEN": os.environ.get("GLOWROOM_TOKEN", "")},
-                    "glowroom-admin": {"TOKEN":     os.environ.get("GLOWROOM_ADMIN_TOKEN", "")},
-                    "rodychi-leads":  {"BOT_TOKEN": os.environ.get("RODYCHI_LEADS_TOKEN", "")},
-                }[name]
-                module = {
-                    "glowroom-main":  "glowroom.run",
-                    "glowroom-admin": "glowroom.admin",
-                    "rodychi-leads":  "rodychi_leads.main",
-                }[name]
-                BOTS[i] = (name, spawn_bot(name, module, env_overrides))
+                log.error("[%s] died with code %s — restarting in 5s", name, proc.returncode)
+                await asyncio.sleep(5)
+                BOTS[i][1] = spawn_bot(name)
 
 
-# ──────────────────────────────────────────────────────
-# Health server
-# ──────────────────────────────────────────────────────
 async def health(_):
     status = {name: ("alive" if proc.poll() is None else f"dead:{proc.returncode}")
               for name, proc in BOTS}

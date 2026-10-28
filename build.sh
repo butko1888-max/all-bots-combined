@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -e
+echo "═══ Preparing folders ═══"
+mkdir -p glowroom rodychi_leads
+touch glowroom/__init__.py rodychi_leads/__init__.py
 echo "═══ Fetching glowroom-bot code ═══"
 rm -rf /tmp/gr
 git clone --depth 1 https://github.com/butko1888-max/glowroom-bot.git /tmp/gr
