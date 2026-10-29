@@ -62,13 +62,38 @@ GUIDES = {
 }
 
 
+LEADS_WEBHOOK = os.environ.get("LEADS_WEBHOOK", "http://127.0.0.1:10001/quiz")
+
 async def notify_admin(context, text: str):
-    if not ADMIN_CHAT_ID or not ADMIN_CHAT_ID.lstrip("-").isdigit():
-        return
+    """Legacy no-op: kept for backward compat. Notifications now routed via send_lead_to_backend."""
+    return
+
+async def send_lead_to_backend(user, param: str):
+    """POST lead data to leads bot webhook so it appears in /leads CRM."""
+    import aiohttp, uuid
+    payload = {
+        "event": "magnet_claim",
+        "quizId": "mag_" + uuid.uuid4().hex[:8],
+        "source": "rdchbonus_bot",
+        "name": (user.first_name or "") + ((" " + user.last_name) if user.last_name else ""),
+        "contact": ("@" + user.username) if user.username else f"tg://user?id={user.id}",
+        "company": "",
+        "tier": "magnet",
+        "score": 0,
+        "answers": {
+            "playbook": param,
+            "telegram_user_id": user.id,
+            "telegram_username": user.username or "",
+        },
+    }
     try:
-        await context.bot.send_message(int(ADMIN_CHAT_ID), text)
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.post(LEADS_WEBHOOK, json=payload) as r:
+                await r.text()
+                log.info("Lead posted to backend: %s", payload["quizId"])
     except Exception as e:
-        log.warning("admin notify fail: %s", e)
+        log.warning("backend lead post fail: %s", e)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,12 +110,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 filename=g["filename"],
                 caption=g["title"],
             )
-            await notify_admin(
-                context,
-                f"📥 Новий лід @rdchbonus_bot\n"
-                f"👤 {user.first_name} (@{user.username or '—'})\n"
-                f"🎯 Playbook: {param}",
-            )
+            await send_lead_to_backend(user, param)
         except Exception as e:
             log.exception("send document failed")
             await update.message.reply_text(
