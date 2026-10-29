@@ -373,6 +373,22 @@ def format_brief_details(qid: str, lead: dict, answers: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_magnet_card(lead: dict, answers: dict) -> str:
+    playbook = answers.get("playbook", "—")
+    pb_titles = {"expert": "📘 Playbook для експерта", "business": "🏢 Playbook для бізнесу", "school": "🎓 Playbook для онлайн-школи"}
+    pb_title = pb_titles.get(playbook, f"Playbook: {playbook}")
+    lines = [
+        "📥 <b>Новий лід · Playbook</b>",
+        "",
+        f"👤 <b>{html_esc(lead.get('name') or '—')}</b>",
+        f"💬 {html_esc(lead.get('contact') or '—')}",
+        f"🎯 {pb_title}",
+        "",
+        f"ID: <code>{lead.get('quiz_id', '')}</code>",
+    ]
+    return "\n".join(lines)
+
+
 def brief_keyboard(quiz_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📝 Все ответы брифа", callback_data=f"detail|{quiz_id}"),
@@ -490,7 +506,7 @@ async def quiz_webhook(request: web.Request):
     log.info("Lead saved: %s / %s / %s (%s)", quiz_id, event, name, source)
 
     # TG notification (only on contact_captured)
-    if event in ("contact_captured", "client_brief"):
+    if event in ("contact_captured", "client_brief", "magnet_claim"):
         lead = {
             "quiz_id": quiz_id, "name": name, "contact": contact, "instagram": instagram,
             "company": company, "score": score, "tier": tier, "source": source,
@@ -499,9 +515,13 @@ async def quiz_webhook(request: web.Request):
             "status": "new"
         }
         is_brief = (event == "client_brief") or (tier == "brief")
+        is_magnet = (event == "magnet_claim") or (tier == "magnet")
         if is_brief:
             card_text = format_brief_card(lead)
             kb = brief_keyboard(quiz_id)
+        elif is_magnet:
+            card_text = format_magnet_card(lead, answers)
+            kb = None
         else:
             card_text = format_lead_card(lead)
             kb = lead_keyboard(quiz_id, "new")
