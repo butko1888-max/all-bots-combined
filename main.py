@@ -41,6 +41,11 @@ BOT_SPECS = {
         "script": "main.py",
         "env":    {"BOT_TOKEN": os.environ.get("RODYCHI_LEADS_TOKEN", "")},
     },
+    "rdch-bonus": {
+        "cwd":    os.path.join(ROOT, "rdch_bonus"),
+        "script": "main.py",
+        "env":    {"BOT_TOKEN": os.environ.get("RDCH_BONUS_TOKEN", "")},
+    },
 }
 
 BOTS = []  # [(name, popen)]
