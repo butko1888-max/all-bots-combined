@@ -415,7 +415,7 @@ async def quiz_webhook(request: web.Request):
     log.info("Lead saved: %s / %s / %s (%s)", quiz_id, event, name, source)
 
     # TG notification (only on contact_captured)
-    if event == "contact_captured":
+    if event in ("contact_captured", "client_brief"):
         lead = {
             "quiz_id": quiz_id, "name": name, "contact": contact, "instagram": instagram,
             "company": company, "score": score, "tier": tier, "source": source,
