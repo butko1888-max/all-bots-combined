@@ -327,21 +327,96 @@ async def cb_status(cb: CallbackQuery):
         except Exception:
             pass
 
+BRIEF_LABELS = {
+    "company_name":      ("1",  "Название компании"),
+    "business_info":     ("2",  "Коротко о бизнесе", {"niche":"Ниша / что продают","years":"Лет на рынке","monthly_sales":"Продаж в месяц"}),
+    "economics":         ("3",  "Экономика одной продажи", {"avg_check":"Средний чек","margin":"Маржа","repeat":"Повторные покупки"}),
+    "current_marketing": ("4",  "Текущее продвижение", {"tg_subs":"Подписчиков в Telegram","other_channels":"Другие каналы","paid_before":"Платная реклама раньше"}),
+    "paid_details":      ("5",  "Детали платного опыта"),
+    "audience":          ("6",  "Аудитория", {"age":"Основной возраст","gender":"Преобладающий пол","geo":"География"}),
+    "uvp":               ("7",  "Почему выбирают именно их (UVP)"),
+    "goals":             ("8",  "Цели на 3 месяца", {"main_goal":"Главная цель","target_number":"Целевой показатель","start_when":"Когда начинать"}),
+    "budget":            ("9",  "Рекламный бюджет в месяц"),
+    "source":            ("10", "Откуда о нас узнали"),
+}
+
+
+def format_brief_details(qid: str, lead: dict, answers: dict) -> str:
+    lines = [
+        f"📋 <b>Клиентский бриф — {html_esc(lead.get('company') or lead.get('name') or '')}</b>",
+        f"ID: <code>{qid}</code>",
+        "",
+    ]
+    for key, meta in BRIEF_LABELS.items():
+        num, label = meta[0], meta[1]
+        val = answers.get(key)
+        empty = (val is None) or (val == "") or (val == []) or (val == {})
+        if empty:
+            lines.append(f"<b>{num}. {label}</b>")
+            lines.append("   —")
+            lines.append("")
+            continue
+        if len(meta) == 3 and isinstance(val, dict):
+            lines.append(f"<b>{num}. {label}</b>")
+            for subk, sublab in meta[2].items():
+                sv = val.get(subk)
+                if isinstance(sv, list):
+                    sv = ", ".join(sv) if sv else "—"
+                lines.append(f"   • {sublab}: <code>{html_esc(sv or '—')}</code>")
+            lines.append("")
+        else:
+            if isinstance(val, list):
+                val = ", ".join(val)
+            lines.append(f"<b>{num}. {label}</b>")
+            lines.append(f"   {html_esc(val)}")
+            lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def brief_keyboard(quiz_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📝 Все ответы брифа", callback_data=f"detail|{quiz_id}"),
+    ]])
+
+
+def format_brief_card(lead: dict) -> str:
+    lines = [
+        "📋 <b>Новый бриф</b>",
+        "",
+        f"🏢 <b>{html_esc(lead.get('company') or lead.get('name') or '—')}</b>",
+        f"🧭 Ниша: {html_esc(lead.get('niche') or '—')}",
+        f"💰 Бюджет: {html_esc(lead.get('budget') or '—')}/мес",
+        f"💳 Средний чек: {html_esc(lead.get('avg_check') or '—')}",
+        f"⏰ Готовность: {html_esc(lead.get('timing') or '—')}",
+        "",
+        f"ID: <code>{lead.get('quiz_id', '')}</code>",
+        "",
+        "👇 Жми кнопку чтобы увидеть все 10 ответов",
+    ]
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data.startswith("detail|"))
 async def cb_detail(cb: CallbackQuery):
     if cb.message.chat.id not in get_admins():
-        await cb.answer("Заборонено.", show_alert=True); return
+        await cb.answer("Запрещено.", show_alert=True); return
     _, qid = cb.data.split("|", 1)
     with db() as c:
         row = c.execute("SELECT * FROM leads WHERE quiz_id=?", (qid,)).fetchone()
     if not row:
-        await cb.answer("Не знайдено."); return
+        await cb.answer("Не найдено."); return
+    lead = dict(row)
     answers = json.loads(row["answers_json"] or "{}")
-    lines = [f"📊 <b>Всі відповіді · {qid}</b>\n"]
-    for k, v in answers.items():
-        val = ", ".join(v) if isinstance(v, list) else v
-        lines.append(f"<b>{k}</b>: {html_esc(val)}")
-    await cb.message.answer("\n".join(lines))
+    if (lead.get("tier") == "brief") or (lead.get("event") == "client_brief"):
+        text = format_brief_details(qid, lead, answers)
+    else:
+        lines = [f"📊 <b>Все ответы · {qid}</b>\n"]
+        for k, v in answers.items():
+            val = ", ".join(v) if isinstance(v, list) else v
+            lines.append(f"<b>{k}</b>: {html_esc(val)}")
+        text = "\n".join(lines)
+    for i in range(0, len(text), 3800):
+        await cb.message.answer(text[i:i+3800])
     await cb.answer()
 
 @router.message(Command("note"))
@@ -423,10 +498,16 @@ async def quiz_webhook(request: web.Request):
             "budget": budget, "ltv": ltv, "timing": timing, "magnet_url": magnet_url,
             "status": "new"
         }
+        is_brief = (event == "client_brief") or (tier == "brief")
+        if is_brief:
+            card_text = format_brief_card(lead)
+            kb = brief_keyboard(quiz_id)
+        else:
+            card_text = format_lead_card(lead)
+            kb = lead_keyboard(quiz_id, "new")
         for admin_id in get_admins():
             try:
-                await bot.send_message(admin_id, format_lead_card(lead),
-                                       reply_markup=lead_keyboard(quiz_id, "new"))
+                await bot.send_message(admin_id, card_text, reply_markup=kb)
             except Exception as e:
                 log.warning("Failed to notify %s: %s", admin_id, e)
 
