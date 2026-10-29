@@ -1,19 +1,23 @@
-"""Combined bot runner — runs 3 Telegram bots as subprocesses + shared health server.
+"""Combined bot runner — runs 4 Telegram bots as subprocesses + shared health/proxy server.
 
 Services:
 - glowroom-main  (@glowroomkira_bot)   runs glowroom/run.py (python-telegram-bot)
 - glowroom-admin (@glowwroom_klientbot) runs glowroom/admin.py (python-telegram-bot)
-- rodychi-leads  (@leadsrodychi_bot)   runs rodychi_leads/main.py (aiogram)
+- rodychi-leads  (@leadsrodychi_bot)   runs rodychi_leads/main.py (aiogram) — exposes /quiz on internal port 10001
+- rdch-bonus     (@rdchbonus_bot)      runs rdch_bonus/main.py
 
 One Render container → one 750h quota.
-Health server on $PORT keeps Render container alive.
-Each sub-bot runs from its own subdirectory so its relative imports work.
+Public server on $PORT:
+  GET  /         → health JSON
+  GET  /health   → health JSON
+  POST /quiz     → proxies to leads bot (http://127.0.0.1:10001/quiz)
 """
 import os
 import sys
 import asyncio
 import logging
 import subprocess
+import aiohttp
 from aiohttp import web
 
 logging.basicConfig(
@@ -25,40 +29,45 @@ log = logging.getLogger("combined")
 PORT = int(os.environ.get("PORT", "10000"))
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+LEADS_INTERNAL_PORT = 10001
+
 BOT_SPECS = {
     "glowroom-main": {
         "cwd":    os.path.join(ROOT, "glowroom"),
         "script": "run.py",
         "env":    {"BOT_TOKEN": os.environ.get("GLOWROOM_TOKEN", "")},
+        "port":   "0",
     },
     "glowroom-admin": {
         "cwd":    os.path.join(ROOT, "glowroom"),
         "script": "admin.py",
         "env":    {"TOKEN": os.environ.get("GLOWROOM_ADMIN_TOKEN", "")},
+        "port":   "0",
     },
     "rodychi-leads": {
         "cwd":    os.path.join(ROOT, "rodychi_leads"),
         "script": "main.py",
         "env":    {"BOT_TOKEN": os.environ.get("RODYCHI_LEADS_TOKEN", "")},
+        "port":   str(LEADS_INTERNAL_PORT),
     },
     "rdch-bonus": {
         "cwd":    os.path.join(ROOT, "rdch_bonus"),
         "script": "main.py",
         "env":    {"BOT_TOKEN": os.environ.get("RDCH_BONUS_TOKEN", "")},
+        "port":   "0",
     },
 }
 
-BOTS = []  # [(name, popen)]
+BOTS = []  # [[name, popen], ...]
 
 
 def spawn_bot(name: str) -> subprocess.Popen:
     spec = BOT_SPECS[name]
     env = dict(os.environ)
     env.update(spec["env"])
-    # Prevent each sub-bot from binding our main health port
-    env["PORT"] = "0"
+    env["PORT"] = spec["port"]
     cmd = [sys.executable, "-u", spec["script"]]
-    log.info("[%s] Spawning: %s (cwd=%s)", name, " ".join(cmd), spec["cwd"])
+    log.info("[%s] Spawning: %s (cwd=%s, PORT=%s)", name, " ".join(cmd), spec["cwd"], spec["port"])
     return subprocess.Popen(cmd, cwd=spec["cwd"], env=env)
 
 
@@ -84,15 +93,47 @@ async def health(_):
     return web.json_response({"ok": True, "bots": status})
 
 
+async def quiz_proxy(request: web.Request):
+    """Forward POST/OPTIONS /quiz to rodychi-leads bot on internal port."""
+    if request.method == "OPTIONS":
+        return web.Response(status=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+    target = f"http://127.0.0.1:{LEADS_INTERNAL_PORT}/quiz"
+    try:
+        body = await request.read()
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.post(target, data=body, headers={"Content-Type": "application/json"}) as r:
+                text = await r.text()
+                return web.Response(
+                    status=r.status,
+                    text=text,
+                    content_type="application/json",
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
+    except Exception as e:
+        log.exception("[quiz-proxy] error: %s", e)
+        return web.json_response(
+            {"ok": False, "err": f"proxy_error: {e}"},
+            status=502,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+
 async def start_health_server():
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
+    app.router.add_post("/quiz", quiz_proxy)
+    app.router.add_options("/quiz", quiz_proxy)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    log.info("Health server on :%s", PORT)
+    log.info("Public server on :%s", PORT)
 
 
 async def main():
